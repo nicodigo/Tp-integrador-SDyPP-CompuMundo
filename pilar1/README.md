@@ -97,3 +97,29 @@ Los tres resultados son verificables independientemente con cualquier implementa
 [Enlace a notebook de ejemplo](https://colab.research.google.com/drive/1B3qJQMFga3Wey6bhy-Vn3YzIgv_7Mbkv?usp=sharing)
 
 ---
+
+### Hit 6 — Longitudes de prefijo en CUDA Hash
+
+Se ejecutó el programa `pilar1/md5_bruteforce/md5_bruteforce.cu` con el string base "blockchain" y prefijos de longitud creciente, midiendo el tiempo real de cada ejecución.
+
+| Prefijo | Longitud | Nonce encontrado | Tiempo real |
+|---------|----------|-----------------|-------------|
+| 00 | 2 | 17.354 | 0.484s |
+| 0000 | 4 | 10.941 | 0.404s |
+| 00000000 | 8 | 2.144.346.197 | 2.211s |
+| 000000000 | 9 | 146.403.858.385 | 127.828s |
+| 0000000000 | 10 | 12.890.126.772.603 | 11.274s |
+
+Los tiempos de longitud 2 y 4 no reflejan el costo computacional real: ambos están dominados por el overhead de inicialización del contexto CUDA, que en esta plataforma ronda los 0.4 segundos y se paga una vez por proceso independientemente del trabajo realizado. El tiempo de búsqueda efectivo para esas longitudes es menor al overhead de inicialización y por lo tanto no es medible con este método.
+
+Los datos significativos comienzan en longitud 8. La razón observada entre 8 y 9 ceros es 127.828 / 2.211 ≈ 57.8x. La razón entre 9 y 10 ceros es 11.274 / 127.828 ≈ 88.2x. El factor teórico esperado entre longitudes consecutivas es 16, dado que cada carácter hexadecimal adicional en el prefijo reduce la probabilidad de éxito de un hash arbitrario por un factor de 16, multiplicando el número esperado de intentos por el mismo valor.
+
+Los ratios observados (57.8x y 88.2x) superan consistentemente el factor teórico. La búsqueda de nonce es un proceso probabilístico: el tiempo real depende de la posición del primer nonce válido dentro del espacio de búsqueda, que es aleatoria. El tiempo teórico es el valor esperado de esa distribución geométrica, pero la varianza es alta. Que los tres runs medibles muestren ratios superiores al teórico indica que los nonces válidos para esta combinación de base string y prefijos cayeron en posiciones desfavorables respecto al promedio.
+
+El prefijo más largo encontrado fue de 10 ceros, en 3 horas 7 minutos y 54 segundos, con el nonce 12.890.126.772.603. La búsqueda con 16 ceros fue interrumpida luego de más de 4 minutos sin resultado: el espacio esperado es del orden de 16^16 ≈ 1.8×10^19 intentos, lo que a la tasa de hash de la T4 representa cientos de años de cómputo.
+
+La relación entre longitud del prefijo y tiempo requerido es exponencial en base 16. Esta propiedad es la que hace al prefijo útil como parámetro de dificultad en Proof of Work: un incremento de un carácter en el prefijo produce un incremento de un orden de magnitud en el costo computacional, permitiendo ajustar la dificultad de minado con granularidad controlada.
+
+[Enlace a notebook de ejemplo](https://colab.research.google.com/drive/1B3qJQMFga3Wey6bhy-Vn3YzIgv_7Mbkv?usp=sharing)
+
+---
