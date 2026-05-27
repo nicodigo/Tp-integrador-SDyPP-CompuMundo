@@ -141,3 +141,28 @@ Esta capacidad de búsqueda por rangos es el mecanismo central del Pool de Trans
 [Enlace a notebook de ejemplo](https://colab.research.google.com/drive/1iSs0Lfaa7qFa1lhG1oPGHyNhX7Asp37V?usp=sharing)
 
 ---
+
+### Comparativa CPU vs GPU
+
+La misma lógica de búsqueda por fuerza bruta se implementó en Python (`pilar1/md5_cpu/md5_cpu.py`) usando `hashlib.md5`, ejecutándose de forma secuencial en CPU. Ambas implementaciones se midieron en el mismo entorno de Google Colab para garantizar que la diferencia observada corresponde al modelo de ejecución y no al hardware subyacente.
+
+| Prefijo | CPU tiempo | CPU nonce | GPU tiempo | GPU nonce | Speedup |
+|---------|-----------|-----------|-----------|-----------|---------|
+| 0000 | 0.049s | 10.941 | 0.404s | 10.941 | — |
+| 00000 | 0.340s | 93.857 | — | — | — |
+| 000000 | 22.806s | 18.000.230 | 0.497s | 52.776.832 | ~45x |
+| 0000000 | 624.145s | 514.027.852 | 1.709s | 1.445.756.666 | ~365x |
+
+El prefijo de 4 ceros no es comparable: el tiempo de CPU (0.049s) es menor al overhead de inicialización del contexto CUDA (~0.4s) que domina el tiempo de GPU para cargas pequeñas. La GPU solo resulta competitiva cuando el trabajo computacional supera ese costo fijo de arranque, que en esta plataforma ronda los 0.4 segundos por proceso.
+
+A partir de 6 ceros la ventaja de GPU es clara y crece con la longitud del prefijo. El speedup pasa de ~45x en 6 ceros a ~365x en 7 ceros porque el trabajo crece exponencialmente mientras el overhead de inicialización permanece constante como fracción del tiempo total.
+
+El throughput sostenido de CPU en Colab, medido a partir de los runs de 6 y 7 ceros, es consistente en ~800.000 hashes por segundo. El throughput de GPU estimado a partir del run de 7 ceros, descontando los 0.4s de inicialización, es del orden de 1.100 millones de hashes por segundo. La diferencia en capacidad de cómputo bruta es de aproximadamente 1.375x.
+
+Los nonces encontrados difieren entre CPU y GPU para el mismo prefijo. CPU busca secuencialmente desde 0 y encuentra el nonce válido más pequeño. GPU distribuye la búsqueda en 327.680 threads con stride y el resultado depende de qué thread gana la carrera. Ambos son soluciones correctas al mismo problema de Proof of Work.
+
+[Enlace a notebook de ejemplo - cpu](https://colab.research.google.com/drive/1ZrWpB9t18yaBpSYl2t2bYQoaZW7Oob65?usp=sharing)
+
+[Enlace a notebook de ejemplo - gpu](https://colab.research.google.com/drive/1B3qJQMFga3Wey6bhy-Vn3YzIgv_7Mbkv?usp=sharing)
+
+---
