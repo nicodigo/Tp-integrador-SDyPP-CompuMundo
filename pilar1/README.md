@@ -108,7 +108,7 @@ Se ejecutó el programa `pilar1/md5_bruteforce/md5_bruteforce.cu` con el string 
 | 0000 | 4 | 10.941 | 0.404s |
 | 00000000 | 8 | 2.144.346.197 | 2.211s |
 | 000000000 | 9 | 146.403.858.385 | 127.828s |
-| 0000000000 | 10 | 12.890.126.772.603 | 11.274s |
+| 0000000000 | 10 | 12.890.126.772.603 | 11274s |
 
 Los tiempos de longitud 2 y 4 no reflejan el costo computacional real: ambos están dominados por el overhead de inicialización del contexto CUDA, que en esta plataforma ronda los 0.4 segundos y se paga una vez por proceso independientemente del trabajo realizado. El tiempo de búsqueda efectivo para esas longitudes es menor al overhead de inicialización y por lo tanto no es medible con este método.
 
