@@ -123,3 +123,21 @@ La relación entre longitud del prefijo y tiempo requerido es exponencial en bas
 [Enlace a notebook de ejemplo](https://colab.research.google.com/drive/1B3qJQMFga3Wey6bhy-Vn3YzIgv_7Mbkv?usp=sharing)
 
 ---
+
+### Hit 7 — Búsqueda de nonce con rango acotado
+
+El programa `pilar1/md5_range/md5_range.cu` extiende el bruteforce del Hit 5 con dos parámetros adicionales: los límites inferior y superior del rango de nonces a explorar. Si no existe ningún nonce válido en ese rango, el programa lo reporta explícitamente.
+
+El cambio respecto al Hit 5 es mínimo. Cada thread calcula su nonce inicial como `min + índice_global` en lugar de solo su índice global. El grid-stride loop agrega una condición de corte: si el nonce actual supera `max`, el thread termina sin escribir resultado. El mecanismo de flag atómica es idéntico al Hit 5.
+
+Las ejecuciones de verificación cubren los tres casos relevantes:
+
+El rango `[0, 100]` sobre "blockchain" con prefijo "0000" no encuentra solución, ya que el nonce conocido 10941 queda fuera. El rango `[0, 999999]` encuentra correctamente el nonce 10941. El rango `[20000, 999999]` no puede encontrar el nonce 10941 porque queda por debajo del límite inferior, y encuentra en su lugar el nonce 22041, que es la siguiente solución válida en ese espacio.
+
+La prueba con una transacción real como base string demuestra que el programa opera correctamente con el formato de datos del Pilar 2. El nonce 44003680 para el prefijo "000000" no se encontró en `[0, 999999]` pero sí en `[1000000, 100000000]`, verificando que el particionado del espacio de búsqueda funciona sin perder soluciones entre rangos contiguos.
+
+Esta capacidad de búsqueda por rangos es el mecanismo central del Pool de Transacciones del Pilar 2: el coordinador divide el espacio completo de nonces en segmentos y asigna uno distinto a cada worker, eliminando el trabajo redundante del Hit 5 donde todos los workers compiten sobre el mismo espacio.
+
+[Enlace a notebook de ejemplo](https://colab.research.google.com/drive/1iSs0Lfaa7qFa1lhG1oPGHyNhX7Asp37V?usp=sharing)
+
+---
