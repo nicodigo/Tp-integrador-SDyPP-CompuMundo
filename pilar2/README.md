@@ -545,3 +545,59 @@ Los tests cubren:
 - `GET /status` → 200 + JSON con campos esperados
 - Ruta inexistente → 404
 - Default `HEALTH_PORT` = 8081
+
+---
+
+## 2.8 — Pool Coordinator + Fanout de tareas
+
+### Cambio de arquitectura
+
+El NCT ya no particiona el nonce space. Publica **un solo mensaje** con el rango completo `[0, NONCE_SPACE]`. Gracias al topic exchange con múltiples colas bindeadas a `task.mining`, cada consumidor recibe una copia:
+
+```
+NCT ──task.mining──▶ Exchange: blockchain (topic)
+                       │
+                       ├──▶ pool-a.inbox ──▶ Pool A particiona → 2 workers
+                       ├──▶ pool-b.inbox ──▶ Pool B particiona → 3 workers
+                       └──▶ worker-x.inbox ──▶ Solo miner (sin pool)
+```
+
+Esto permite que múltiples pools compitan entre sí. Cada pool divide el trabajo internamente según sus propios workers. El NCT no sabe quién resolvió el bloque — solo recibe un `ResultMessage` válido por `mining_results`.
+
+### Nuevo componente: PoolCoordinator
+
+Archivo: `pilar2/pool/pool.py`
+
+| Responsabilidad | Detalle |
+|---|---|
+| Consumir tareas | Cola `pool.{POOL_ID}.inbox` bindeada a `task.mining` |
+| Particionar | Divide el rango completo en `POOL_WORKER_COUNT` subrangos |
+| Distribuir | Publica a `pool.{POOL_ID}.tasks` (cola de sus workers) |
+| Recolectar | Consume de `pool.{POOL_ID}.results` |
+| Verificar | Comprueba PoW localmente antes de reenviar al NCT |
+| Reenviar | Publica resultado válido a `mining_results` con routing key `result.{pool_id}` |
+| Abortar | Broadcast a `pool.{POOL_ID}.control` cuando un worker encuentra solución |
+
+### Worker en modo pool
+
+Cuando el worker tiene `POOL_ID=pumpkin`, adapta su comportamiento:
+
+| Aspecto | Solo | Pool |
+|---|---|---|
+| Consume de | `worker.{id}.inbox` (bind a `task.mining`) | `pool.pumpkin.tasks` |
+| Publica resultado a | `result.{id}` | `pool.pumpkin.result.{id}` |
+| Heartbeat | `worker.heartbeat` | `worker.pumpkin.heartbeat` |
+| Abort escucha | `control` | `control` + `pool.pumpkin.control` |
+
+### Docker Compose
+
+```
+nct (:8080)      — coordinator, publica 1 tarea por bloque
+pool-a (:8090)   — pool coordinator, particiona para 2 workers
+worker-a1 (:8081) — minero del pool-a
+worker-a2 (:8082) — minero del pool-a
+```
+
+### Tests
+
+No se agregan tests nuevos en este paso (el pool es un componente de integración que requiere RabbitMQ real). Los tests existentes (61) siguen pasando — los cambios en broker, NCT y worker fueron adaptados en los tests correspondientes.

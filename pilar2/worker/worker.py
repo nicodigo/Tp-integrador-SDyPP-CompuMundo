@@ -92,12 +92,14 @@ class WorkerService:
         miner_binary: str = "./md5_range",
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         health_port: int = DEFAULT_HEALTH_PORT,
+        pool_id: str | None = None,
     ) -> None:
         self.worker_id = worker_id
         self.rmq_url = rmq_url
         self.miner = MinerService(binary_path=miner_binary)
         self.heartbeat_interval = heartbeat_interval
         self.health_port = health_port
+        self.pool_id = pool_id
 
         # Mutable state
         self._current_task_id: Optional[str] = None
@@ -117,6 +119,21 @@ class WorkerService:
         self._channel = conn.channel()
         declare_topology(self._channel)
 
+        # Bind to task source: fanout inbox (solo) or pool queue
+        if self.pool_id:
+            inbox = f"pool.{self.pool_id}.inbox"
+            from broker.broker import declare_consumer_queue
+            declare_consumer_queue(self._channel, inbox, "task.mining")
+            tasks_queue = f"pool.{self.pool_id}.tasks"
+            self._channel.queue_declare(queue=tasks_queue, durable=True)
+            self._channel.queue_bind(exchange=EXCHANGE, queue=tasks_queue,
+                                     routing_key=f"pool.{self.pool_id}.task.*")
+        else:
+            inbox = f"worker.{self.worker_id}.inbox"
+            from broker.broker import declare_consumer_queue
+            declare_consumer_queue(self._channel, inbox, "task.mining")
+            tasks_queue = inbox
+
         # Register immediately (safe — called from main thread before start_consuming)
         self._send_heartbeat(self._channel)
 
@@ -132,13 +149,15 @@ class WorkerService:
             name="health-server",
         ).start()
 
-        # Control listener (abort signals)
+        # Control listener (abort signals — NCT + pool)
         self._setup_control_listener()
 
         # Task consumer (blocking — must be last)
-        self._setup_task_consumer()
-        logger.info("Worker %s ready — health on :%d, waiting for mining tasks",
-                     self.worker_id, self.health_port)
+        self._setup_task_consumer(tasks_queue)
+        logger.info("Worker %s ready (%s) — health on :%d",
+                     self.worker_id,
+                     f"pool={self.pool_id}" if self.pool_id else "solo",
+                     self.health_port)
         self._channel.start_consuming()
 
     def shutdown(self) -> None:
@@ -167,9 +186,10 @@ class WorkerService:
             "action": "heartbeat",
             "timestamp": time.time(),
         }
+        key = f"worker.{self.pool_id}.heartbeat" if self.pool_id else "worker.heartbeat"
         channel.basic_publish(
             exchange=EXCHANGE,
-            routing_key="worker.heartbeat",
+            routing_key=key,
             body=json.dumps(msg, sort_keys=True),
         )
 
@@ -196,6 +216,11 @@ class WorkerService:
         self._channel.queue_bind(
             exchange=EXCHANGE, queue=queue_name, routing_key=CONTROL_ROUTING_KEY,
         )
+        if self.pool_id:
+            self._channel.queue_bind(
+                exchange=EXCHANGE, queue=queue_name,
+                routing_key=f"pool.{self.pool_id}.control",
+            )
         self._channel.basic_consume(
             queue=queue_name,
             on_message_callback=self._on_control,
@@ -212,10 +237,10 @@ class WorkerService:
     # Task consumer
     # ------------------------------------------------------------------
 
-    def _setup_task_consumer(self) -> None:
+    def _setup_task_consumer(self, queue_name: str) -> None:
         self._channel.basic_qos(prefetch_count=1)
         self._channel.basic_consume(
-            queue=TASKS_QUEUE,
+            queue=queue_name,
             on_message_callback=self._on_task,
             auto_ack=False,
         )
@@ -253,9 +278,14 @@ class WorkerService:
                 nonce=result.nonce,
                 hash=result.hash,
             )
+            result_key = (
+                f"pool.{self.pool_id}.result.{self.worker_id}"
+                if self.pool_id
+                else f"result.{self.worker_id}"
+            )
             self._channel.basic_publish(
                 exchange=EXCHANGE,
-                routing_key=f"result.{self.worker_id}",
+                routing_key=result_key,
                 body=msg.to_json(),
             )
             logger.info("Nonce found: %d (hash=%s)", result.nonce, result.hash)
@@ -297,6 +327,7 @@ def main() -> None:
     miner_binary = os.getenv("MINER_BINARY", "./md5_range")
     heartbeat = float(os.getenv("HEARTBEAT_INTERVAL", str(DEFAULT_HEARTBEAT_INTERVAL)))
     health_port = int(os.getenv("HEALTH_PORT", str(DEFAULT_HEALTH_PORT)))
+    pool_id = os.getenv("POOL_ID") or None
 
     worker = WorkerService(
         worker_id=worker_id,
@@ -304,6 +335,7 @@ def main() -> None:
         miner_binary=miner_binary,
         heartbeat_interval=heartbeat,
         health_port=health_port,
+        pool_id=pool_id,
     )
 
     def _shutdown(signum: int, frame: Any) -> None:

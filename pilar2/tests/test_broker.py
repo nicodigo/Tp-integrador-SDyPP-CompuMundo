@@ -8,6 +8,7 @@ from broker.broker import (
     EXCHANGE,
     RESULTS_QUEUE,
     TASKS_QUEUE,
+    WORKER_REGISTRY_QUEUE,
     broadcast_abort,
     consume_result,
     declare_topology,
@@ -82,15 +83,12 @@ class TestDeclareTopology(unittest.TestCase):
         channel.exchange_declare.assert_called_once_with(
             exchange=EXCHANGE, exchange_type="topic", durable=True
         )
-        channel.queue_declare.assert_has_calls(
-            [call(queue=TASKS_QUEUE, durable=True),
-             call(queue=RESULTS_QUEUE, durable=True)],
-            any_order=True,
+        # mining_tasks is no longer a shared queue (pools/solo miners declare their own)
+        channel.queue_bind.assert_any_call(
+            exchange=EXCHANGE, queue=RESULTS_QUEUE, routing_key="result.*"
         )
-        channel.queue_bind.assert_has_calls(
-            [call(exchange=EXCHANGE, queue=TASKS_QUEUE, routing_key="task.*"),
-             call(exchange=EXCHANGE, queue=RESULTS_QUEUE, routing_key="result.*")],
-            any_order=True,
+        channel.queue_bind.assert_any_call(
+            exchange=EXCHANGE, queue=WORKER_REGISTRY_QUEUE, routing_key="worker.*"
         )
 
 

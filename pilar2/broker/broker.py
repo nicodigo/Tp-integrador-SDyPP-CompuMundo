@@ -78,11 +78,7 @@ def declare_topology(channel: Any) -> None:
     """
     channel.exchange_declare(exchange=EXCHANGE, exchange_type="topic", durable=True)
 
-    # Shared work queue for mining tasks (NCT → workers)
-    channel.queue_declare(queue=TASKS_QUEUE, durable=True)
-    channel.queue_bind(exchange=EXCHANGE, queue=TASKS_QUEUE, routing_key="task.*")
-
-    # Shared results queue (workers → NCT)
+    # Shared results queue (workers/pools → NCT)
     channel.queue_declare(queue=RESULTS_QUEUE, durable=True)
     channel.queue_bind(exchange=EXCHANGE, queue=RESULTS_QUEUE, routing_key="result.*")
 
@@ -106,8 +102,8 @@ def publish_tasks(
 ) -> list[TaskMessage]:
     """Partition the nonce space and publish one task per partition.
 
-    Returns the list of published messages so the NCT can track in-flight
-    tasks (needed for correlation when results arrive).
+    Used by pool coordinators to distribute sub-ranges to their workers.
+    Returns the list of published messages.
     """
     chunk = range_size // num_workers
     tasks: list[TaskMessage] = []
@@ -129,14 +125,52 @@ def publish_tasks(
             exchange=EXCHANGE,
             routing_key=f"task.{i}",
             body=task.to_json(),
-            properties=None,  # pika sets delivery_mode=1 by default; use PERSISTENT for durability
         )
 
     logger.info(
-        "Published %d mining tasks for block %d (difficulty=%d, range=[0, %d])",
+        "Published %d sub-tasks for block %d (difficulty=%d, range=[0, %d])",
         num_workers, block_index, difficulty, range_size,
     )
     return tasks
+
+
+def publish_mining_task(
+    channel: Any,
+    block_index: int,
+    fingerprint: str,
+    difficulty: int,
+    range_size: int = 1_000_000_000,
+) -> TaskMessage:
+    """Publish a single mining task to all consumers (fanout via topic).
+
+    Pools and solo miners bind their own queues to ``task.mining``.
+    One message → every subscriber gets a copy → they compete.
+    """
+    task = TaskMessage.create(
+        block_index=block_index,
+        fingerprint=fingerprint,
+        difficulty=difficulty,
+        range_min=0,
+        range_max=range_size - 1,
+    )
+    channel.basic_publish(
+        exchange=EXCHANGE,
+        routing_key="task.mining",
+        body=task.to_json(),
+    )
+    logger.info("Published mining task for block %d (range=[0, %d])", block_index, range_size)
+    return task
+
+
+def declare_consumer_queue(channel: Any, queue_name: str, routing_key: str) -> None:
+    """Declare a durable queue and bind it to a routing key.
+
+    Called by pools and solo miners when they start up, so each consumer
+    gets its own copy of broadcast messages.
+    """
+    channel.queue_declare(queue=queue_name, durable=True)
+    channel.queue_bind(exchange=EXCHANGE, queue=queue_name, routing_key=routing_key)
+    logger.info("Declared consumer queue %s (bind: %s)", queue_name, routing_key)
 
 
 def consume_result(

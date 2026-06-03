@@ -29,7 +29,7 @@ from broker.broker import (
     broadcast_abort,
     declare_topology,
     get_connection,
-    publish_tasks,
+    publish_mining_task,
 )
 from broker.messages import ResultMessage
 from nct.state import NCTConfig, NCTState
@@ -204,18 +204,11 @@ def block_loop(
         while not mined and not state.shutdown.is_set():
             state.set_current_block(block, nonce_space)
 
-            worker_count = state.get_active_worker_count()
-            if worker_count == 0:
-                logger.warning("No active workers — waiting for workers to register...")
-                time.sleep(2)
-                continue
-
-            publish_tasks(
+            publish_mining_task(
                 channel,
                 block_index=block.index,
                 fingerprint=block.fingerprint,
                 difficulty=config.difficulty,
-                num_workers=worker_count,
                 range_size=nonce_space,
             )
 

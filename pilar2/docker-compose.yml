@@ -37,7 +37,6 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
-      - WORKER_COUNT=2
       - BLOCK_SIZE=5
       - BLOCK_TIMEOUT=30
       - DIFFICULTY=4
@@ -45,7 +44,23 @@ services:
       - PORT=8080
       - LOG_FILE=/var/log/nct.log
 
-  worker-1:
+  pool-a:
+    build:
+      context: .
+      dockerfile: pool/Dockerfile
+    ports:
+      - "8090:8090"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - POOL_ID=pool-a
+      - POOL_WORKER_COUNT=2
+      - HEALTH_PORT=8090
+      - LOG_FILE=/var/log/pool-a.log
+
+  worker-a1:
     build:
       context: .
       dockerfile: worker/Dockerfile
@@ -57,12 +72,13 @@ services:
     environment:
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
       - MINER_BINARY=./md5_range
-      - WORKER_ID=worker-1
+      - WORKER_ID=worker-a1
+      - POOL_ID=pool-a
       - HEARTBEAT_INTERVAL=5
       - HEALTH_PORT=8081
-      - LOG_FILE=/var/log/worker-1.log
+      - LOG_FILE=/var/log/worker-a1.log
 
-  worker-2:
+  worker-a2:
     build:
       context: .
       dockerfile: worker/Dockerfile
@@ -74,10 +90,11 @@ services:
     environment:
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
       - MINER_BINARY=./md5_range
-      - WORKER_ID=worker-2
+      - WORKER_ID=worker-a2
+      - POOL_ID=pool-a
       - HEARTBEAT_INTERVAL=5
       - HEALTH_PORT=8081
-      - LOG_FILE=/var/log/worker-2.log
+      - LOG_FILE=/var/log/worker-a2.log
 
 volumes:
   redis_data:
