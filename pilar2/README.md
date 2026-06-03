@@ -136,3 +136,153 @@ Los tests cubren:
 - Timeout del subprocess
 - Crash del binario CUDA
 - Verificación de que los argumentos se transmiten correctamente al subprocess
+
+---
+
+## 2.3 — Infraestructura base: Redis + Docker Compose
+
+### Docker Compose
+
+Archivo: `docker-compose.yml` (raíz de pilar2/)
+
+```yaml
+services:
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    volumes: [redis_data:/data]
+    command: redis-server --appendonly yes
+```
+
+- **Redis 7 Alpine** — imagen liviana (~30 MB)
+- **AOF persistence** (`--appendonly yes`) — los datos sobreviven reinicios del contenedor
+- **Named volume** (`redis_data`) — persistencia en disco del host
+- **Healthcheck** — `redis-cli ping` cada 5s para que servicios dependientes esperen antes de iniciar
+
+En pasos siguientes se agregan RabbitMQ y los servicios Python al mismo archivo.
+
+Levantar:
+```bash
+cd pilar2 && docker compose up -d
+```
+
+### Módulo chain_store
+
+Archivo: `pilar2/storage/chain_store.py`
+
+API de persistencia contra Redis:
+
+| Función | Operación Redis | Descripción |
+|---|---|---|
+| `save_block(client, block)` | `RPUSH` | Agrega bloque al final de la cadena |
+| `get_block(client, index)` | `LINDEX` | Obtiene bloque por índice (0 = génesis) |
+| `get_latest_block(client)` | `LLEN` + `LINDEX` | Último bloque minado |
+| `get_chain_height(client)` | `LLEN` | Cantidad de bloques en la cadena |
+| `validate_chain(client)` | Itera toda la lista | Valida integridad estructural de cada bloque |
+
+**Estructura en Redis:**
+```
+blockchain:blocks  →  List  →  [JSON(block0), JSON(block1), ...]
+```
+
+La cadena se modela como una Redis List — append-only, ordenada, y atómica. Cada elemento es un bloque serializado a JSON con `sort_keys=True` (determinístico).
+
+**Conexión:** `connect()` lee `REDIS_URL` del entorno (default `redis://localhost:6379`). El import de `redis-py` es lazy — solo se carga al llamar a `connect()`, no al importar el módulo. Esto permite correr los tests unitarios sin Redis instalado.
+
+Configuración en `storage/.env`:
+```
+REDIS_URL=redis://redis:6379
+```
+
+### Tests
+
+Archivo: `tests/test_chain_store.py`
+
+```bash
+cd pilar2 && python3 -m unittest tests/test_chain_store.py -v
+```
+
+Los tests cubren:
+- `save_block` → `RPUSH` con payload JSON correcto
+- `get_block` → deserialización correcta desde JSON
+- `get_block` con índice inexistente → `None`
+- Roundtrip completo con FakeClient (lista en memoria)
+- `validate_chain` sobre cadena vacía, cadena válida de 2 bloques
+- `validate_chain` detecta cadena rota (`previous_hash` incorrecto)
+
+---
+
+## 2.4 — Mensajería asincrónica con RabbitMQ
+
+### Topología
+
+Un único **topic exchange** (`blockchain`) con tres bindings. Esto cumple "arquitectura híbrida de colas y tópicos":
+
+| Queue | Binding | Patrón | Propósito |
+|---|---|---|---|
+| `mining_tasks` | `task.*` | Cola (work queue) | NCT publica tareas con rangos particionados → workers colaboran |
+| `mining_results` | `result.*` | Cola | Workers publican soluciones → NCT consume la primera válida |
+| `{anon}` por worker | `control` | Tópico (pub/sub) | NCT emite abort → todos los workers frenan simultáneamente |
+
+**Colaboración vs competencia:** Los workers *colaboran* porque cada uno recibe un subrango distinto del espacio de nonces. No compiten por el mismo trabajo — dividen el espacio y el primero que encuentra publica.
+
+### Mensajes
+
+```
+┌─────────────────────────────────────────────┐
+│  TaskMessage (NCT → workers)                │
+│  {                                          │
+│    task_id, block_index, fingerprint,       │
+│    difficulty (int), range_min, range_max   │
+│  }                                          │
+├─────────────────────────────────────────────┤
+│  ResultMessage (worker → NCT)               │
+│  {                                          │
+│    task_id, block_index, worker_id,         │
+│    nonce, hash (MD5)                        │
+│  }                                          │
+├─────────────────────────────────────────────┤
+│  ControlMessage (NCT → workers, broadcast)  │
+│  {                                          │
+│    action: "abort", task_id                 │
+│  }                                          │
+└─────────────────────────────────────────────┘
+```
+
+### Conversión de difficulty
+
+El NCT envía `difficulty` como entero (ej: `4`). La conversión a string de ceros (`"0000"`) ocurre exclusivamente en el worker antes de invocar al binario CUDA:
+
+```python
+target_prefix = "0" * task.difficulty
+```
+
+### Docker Compose
+
+RabbitMQ se agregó como segundo servicio:
+
+```yaml
+rabbitmq:
+  image: rabbitmq:3-management-alpine
+  ports: ["5672:5672", "15672:15672"]  # AMQP + Management UI
+```
+
+El puerto `15672` expone la consola de administración web (útil para debug y para la defensa).
+
+### Tests
+
+Archivo: `tests/test_broker.py`
+
+```bash
+cd pilar2 && uv run python -m unittest tests/test_broker.py -v
+```
+
+Los tests cubren:
+- Serialización/deserialización de TaskMessage, ResultMessage, ControlMessage
+- `declare_topology`: creación de exchange + queues + bindings correctos
+- `publish_tasks`: particionado de nonce space (3 workers, edge case de resto)
+- `consume_result`: polling con resultado encontrado y timeout
+- `broadcast_abort`: publicación de mensaje de control
+- `setup_control_listener`: cola anónima + callback recibe mensaje correctamente
+- `publish_result`: routing key correcta (`result.{worker_id}`)
+- `start_consuming_tasks`: QoS prefetch=1 + ack manual después de procesar

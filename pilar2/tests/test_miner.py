@@ -4,7 +4,7 @@ import subprocess
 import unittest
 from unittest.mock import MagicMock, patch
 
-from shared.miner import (
+from miner.miner import (
     MinerError,
     MinerResult,
     MinerService,
