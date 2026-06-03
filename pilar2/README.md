@@ -391,3 +391,83 @@ Los tests cubren:
 - `accumulate_transactions`: pool lleno, timeout, shutdown
 - `handle_result`: rechazo stale, aceptación válida + efectos (persist, abort, señal), rechazo hash inválido
 - `NCTState`: operaciones del pool, drenado con límite, set/get de bloque actual
+
+---
+
+## 2.6 — Worker + Keep-alive dinámico
+
+### Worker Service
+
+El worker es un proceso Python que se conecta a RabbitMQ, consume tareas de `mining_tasks`, ejecuta el binario CUDA vía `MinerService`, y publica resultados en `mining_results`.
+
+**Ciclo de vida de una tarea:**
+
+```
+recibe TaskMessage de mining_tasks
+    │
+target_prefix = "0" * task.difficulty     ← conversión int→string
+    │
+self.miner.mine(fingerprint, target_prefix, range_min, range_max)
+    │
+    ├── abort recibido → descarta resultado, ack
+    │
+    └── solución encontrada → publica ResultMessage a result.{worker_id}
+             └── no encontrada → log warning, ack
+```
+
+Configuración (`worker/.env`):
+
+| Variable | Default | Descripción |
+|---|---|---|
+| `WORKER_ID` | `worker-{uuid}` | Identificador único |
+| `RABBITMQ_URL` | `amqp://localhost:5672/` | Conexión a RabbitMQ |
+| `MINER_BINARY` | `./md5_range` | Path al binario CUDA |
+| `HEARTBEAT_INTERVAL` | `5` | Segundos entre heartbeats |
+
+### Keep-alive (registro dinámico)
+
+El worker envía heartbeats periódicos a la cola `worker_registry` con routing key `worker.heartbeat`:
+
+```json
+{"worker_id": "worker-1", "action": "heartbeat", "timestamp": 1717...}
+```
+
+El NCT consume estos mensajes en el result loop y mantiene un registro en `NCTState`:
+
+```python
+state.update_worker(data["worker_id"])          # guarda timestamp
+worker_count = state.get_active_worker_count()  # cuenta workers vivos (últimos 15s)
+```
+
+Workers que no envían heartbeat en `HEARTBEAT_TIMEOUT` (15s) se consideran caídos y se excluyen del conteo.
+
+### Cambios en el NCT
+
+- **`block_loop`**: usa `state.get_active_worker_count()` en lugar de `config.worker_count`. Si no hay workers activos, espera y reintenta.
+- **`result_loop`**: ahora consume dos colas — `mining_results` y `worker_registry`.
+- **Topología**: nueva cola `worker_registry` bindeada al exchange `blockchain` con `worker.*`.
+
+### Docker
+
+```yaml
+worker:
+  build: { context: ., dockerfile: worker/Dockerfile }
+  depends_on: { rabbitmq: { condition: service_healthy } }
+  deploy: { replicas: 2 }
+```
+
+El worker no depende de Redis — solo habla con RabbitMQ y el binario CUDA local.
+
+### Tests
+
+Archivo: `tests/test_worker.py`
+
+```bash
+cd pilar2 && uv run python -m unittest tests/test_worker.py -v
+```
+
+Los tests cubren:
+- `NCTState.update_worker`: registro individual y múltiple
+- `NCTState.get_active_worker_count`: workers activos, expiración por timeout
+- `NCTState.active_workers_snapshot`: orden alfabético
+- Actualización de heartbeat resetea el timer de expiración

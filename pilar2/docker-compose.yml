@@ -44,5 +44,25 @@ services:
       - NONCE_SPACE=1000000000
       - PORT=8080
 
+  # -----------------------------------------------------------------------
+  # Worker — requires the Pilar 1 CUDA binary at MINER_BINARY path.
+  # Without GPU passthrough, the binary will fail; set MINER_BINARY to
+  # a stub (e.g. "true") for connectivity tests.
+  # -----------------------------------------------------------------------
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - MINER_BINARY=./md5_range
+      - WORKER_ID=worker-docker
+      - HEARTBEAT_INTERVAL=5
+    deploy:
+      replicas: 2
+
 volumes:
   redis_data:

@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 EXCHANGE = "blockchain"
 TASKS_QUEUE = "mining_tasks"
 RESULTS_QUEUE = "mining_results"
+WORKER_REGISTRY_QUEUE = "worker_registry"
 CONTROL_ROUTING_KEY = "control"
 
 # ---------------------------------------------------------------------------
@@ -84,6 +85,10 @@ def declare_topology(channel: Any) -> None:
     # Shared results queue (workers → NCT)
     channel.queue_declare(queue=RESULTS_QUEUE, durable=True)
     channel.queue_bind(exchange=EXCHANGE, queue=RESULTS_QUEUE, routing_key="result.*")
+
+    # Worker registry queue (workers → NCT heartbeats & registration)
+    channel.queue_declare(queue=WORKER_REGISTRY_QUEUE, durable=True)
+    channel.queue_bind(exchange=EXCHANGE, queue=WORKER_REGISTRY_QUEUE, routing_key="worker.*")
 
 
 # ---------------------------------------------------------------------------

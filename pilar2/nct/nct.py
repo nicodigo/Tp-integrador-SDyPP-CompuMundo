@@ -23,6 +23,8 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 from broker.broker import (
+    RESULTS_QUEUE,
+    WORKER_REGISTRY_QUEUE,
     broadcast_abort,
     declare_topology,
     get_connection,
@@ -194,12 +196,18 @@ def block_loop(
         while not mined and not state.shutdown.is_set():
             state.set_current_block(block, nonce_space)
 
+            worker_count = state.get_active_worker_count()
+            if worker_count == 0:
+                logger.warning("No active workers — waiting for workers to register...")
+                time.sleep(2)
+                continue
+
             publish_tasks(
                 channel,
                 block_index=block.index,
                 fingerprint=block.fingerprint,
                 difficulty=config.difficulty,
-                num_workers=config.worker_count,
+                num_workers=worker_count,
                 range_size=nonce_space,
             )
 
@@ -224,18 +232,31 @@ def result_loop(
     redis_client: Any,
     channel: Any,
 ) -> None:
-    """Thread 2 — poll mining results, verify PoW, persist blocks."""
+    """Thread 2 — poll mining results and worker registry, verify PoW, persist blocks."""
     logger.info("Result loop started")
 
     while not state.shutdown.is_set():
-        # basic_get is non-blocking; a short sleep prevents busy-waiting
+        had_work = False
+
+        # ---- Poll mining results ----
         method, _properties, body = channel.basic_get(
-            queue="mining_results", auto_ack=True,
+            queue=RESULTS_QUEUE, auto_ack=True,
         )
         if method and body:
             result = ResultMessage.from_json(body.decode())
             handle_result(state, redis_client, channel, result)
-        else:
+            had_work = True
+
+        # ---- Poll worker registry (heartbeats) ----
+        method, _properties, body = channel.basic_get(
+            queue=WORKER_REGISTRY_QUEUE, auto_ack=True,
+        )
+        if method and body:
+            data = json.loads(body.decode())
+            state.update_worker(data["worker_id"])
+            had_work = True
+
+        if not had_work:
             time.sleep(0.1)
 
     logger.info("Result loop stopped")
