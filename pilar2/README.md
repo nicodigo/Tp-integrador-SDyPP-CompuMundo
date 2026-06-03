@@ -286,3 +286,108 @@ Los tests cubren:
 - `setup_control_listener`: cola anónima + callback recibe mensaje correctamente
 - `publish_result`: routing key correcta (`result.{worker_id}`)
 - `start_consuming_tasks`: QoS prefetch=1 + ack manual después de procesar
+
+---
+
+## 2.5 — Nodo Coordinador (NCT)
+
+### Arquitectura de threads
+
+El NCT ejecuta tres loops concurrentes con `threading`:
+
+| Thread | Responsabilidad |
+|---|---|
+| **Block loop** | Acumula transacciones → crea bloque → publica tareas de minería → espera resultado → expande rango en timeout |
+| **Result loop** | Consume `mining_results` → verifica PoW → completa y persiste bloque → broadcast abort → señaliza `block_mined` |
+| **Health loop** | Servidor HTTP en `:8080` con `GET /health`, `GET /status`, `POST /transaction` |
+
+Se usa `threading` (no asyncio) porque el cuello de botella es I/O de red (RabbitMQ, Redis), no CPU.
+
+### Sincronización
+
+El estado compartido se maneja con `NCTState`:
+
+- `threading.Event("block_mined")` — el result loop lo activa, el block loop espera
+- `threading.Event("shutdown")` — señal de apagado para todos los threads
+- `threading.Lock` — protege `current_block`/`fingerprint`/`difficulty` y el pool de transacciones
+
+### Ciclo de vida de un bloque
+
+```
+accumulate_transactions()           ← espera BLOCK_SIZE txs o BLOCK_TIMEOUT
+    │
+create_block(index, txs, prev_hash)
+    │
+fingerprint = block.fingerprint     ← SHA-256 sin nonce
+    │
+publish_tasks(N ranges)
+    │
+block_mined.wait(timeout)           ← espera resultado del result loop
+    │
+    ├── mined → log, next block
+    └── timeout → nonce_space × 2, republicar, volver a esperar
+```
+
+### Verificación de PoW
+
+Dos chequeos independientes en `handle_result()`:
+
+1. `MD5(fingerprint + nonce) == result.hash` (integridad)
+2. `result.hash.startswith("0" * difficulty)` (dificultad)
+
+El `result.hash` es el MD5 (32 chars) del PoW. El `block.hash` (SHA-256, 64 chars) se computa **después** con `block.compute_hash()` y se usa para encadenamiento.
+
+### Filtro de resultados stale
+
+Si llega un resultado para un bloque que ya fue minado (otro worker encontró la solución justo después del abort), se descarta comparando `result.block_index` con el bloque actual.
+
+### Endpoints HTTP
+
+| Método | Ruta | Respuesta |
+|---|---|---|
+| `GET` | `/health` | `{"status": "ok"}` |
+| `GET` | `/status` | `{"chain_height": N, "pending_transactions": M, "current_block": X}` |
+| `POST` | `/transaction` | `{"tx_id": "..."}` (body: `{"sender", "receiver", "amount"}`) |
+
+Implementado con `http.server` de stdlib — sin dependencias extra.
+
+### Configuración
+
+Variables de entorno (archivo `nct/.env`):
+
+| Variable | Default | Descripción |
+|---|---|---|
+| `REDIS_URL` | `redis://localhost:6379` | Conexión a Redis |
+| `RABBITMQ_URL` | `amqp://localhost:5672/` | Conexión a RabbitMQ |
+| `WORKER_COUNT` | `2` | Cantidad de workers (fijo en 2.5) |
+| `BLOCK_SIZE` | `5` | Transacciones por bloque |
+| `BLOCK_TIMEOUT` | `30` | Segundos máx. esperando transacciones |
+| `DIFFICULTY` | `4` | Ceros requeridos en PoW |
+| `NONCE_SPACE` | `1_000_000_000` | Rango inicial de búsqueda |
+| `PORT` | `8080` | Puerto HTTP |
+
+### Docker
+
+```dockerfile
+FROM python:3.12-alpine
+COPY shared/ broker/ storage/ nct/ /app/
+RUN pip install redis pika
+ENV PYTHONPATH=/app
+CMD ["python", "-m", "nct.nct"]
+```
+
+El servicio `nct` en `docker-compose.yml` depende de Redis y RabbitMQ con `condition: service_healthy`.
+
+### Tests
+
+Archivo: `tests/test_nct.py`
+
+```bash
+cd pilar2 && uv run python -m unittest tests/test_nct.py -v
+```
+
+Los tests cubren:
+- `verify_pow_result`: nonce válido, hash incorrecto, dificultad no alcanzada
+- `accumulate_transactions`: pool lleno, timeout, shutdown
+- `handle_result`: rechazo stale, aceptación válida + efectos (persist, abort, señal), rechazo hash inválido
+- `NCTState`: operaciones del pool, drenado con límite, set/get de bloque actual

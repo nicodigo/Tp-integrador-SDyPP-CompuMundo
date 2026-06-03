@@ -23,5 +23,26 @@ services:
       timeout: 5s
       retries: 10
 
+  nct:
+    build:
+      context: .
+      dockerfile: nct/Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - WORKER_COUNT=2
+      - BLOCK_SIZE=5
+      - BLOCK_TIMEOUT=30
+      - DIFFICULTY=4
+      - NONCE_SPACE=1000000000
+      - PORT=8080
+
 volumes:
   redis_data:
