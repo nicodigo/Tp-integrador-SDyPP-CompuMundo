@@ -35,6 +35,7 @@ from broker.messages import ResultMessage
 from nct.state import NCTConfig, NCTState
 from shared.block import Block, Transaction
 from shared.schemas import (
+    BalanceResponse,
     ErrorResponse,
     HealthResponse,
     NCTStatusResponse,
@@ -42,9 +43,15 @@ from shared.schemas import (
     TransactionResponse,
 )
 from storage.chain_store import (
+    BALANCE_PREFIX,
     connect as redis_connect,
+    get_balance,
+    get_block,
+    get_chain_height,
     get_latest_block,
+    rebuild_balances_from_chain,
     save_block,
+    update_balances_from_block,
 )
 
 logger = logging.getLogger(__name__)
@@ -90,6 +97,58 @@ def verify_pow_result(
     return valid, pow_hash
 
 
+def drain_pool_validated(
+    state: NCTState,
+    redis_client: Any,
+    max_count: int,
+) -> list[Transaction]:
+    """Drain the transaction pool applying balance validation for SPEND txns.
+
+    Maintains an in-memory *overlay* that tracks per-student deltas
+    accumulated during this block's assembly.  This prevents double-spend
+    within a single block without requiring synchronous balance checks at
+    POST time.
+
+    EARN transactions are always accepted (structural validation already
+    passed).  SPEND transactions are accepted only when::
+
+        confirmed_balance + overlay_delta >= amount
+
+    Discarded transactions are **not** returned to the pool — the client
+    must re-send the POST if it wants to retry.
+    """
+    candidates = state.drain_pool(max_count)
+    overlay: dict[str, float] = {}   # student_id → accumulated delta in this block
+    valid: list[Transaction] = []
+    discarded: list[Transaction] = []
+
+    for tx in candidates:
+        if tx.tx_type == "EARN":
+            valid.append(tx)
+            overlay[tx.receiver] = overlay.get(tx.receiver, 0.0) + tx.amount
+
+        elif tx.tx_type == "SPEND":
+            confirmed = get_balance(redis_client, tx.sender)
+            in_flight = overlay.get(tx.sender, 0.0)
+            effective = confirmed + in_flight
+
+            if effective >= tx.amount:
+                valid.append(tx)
+                overlay[tx.sender] = in_flight - tx.amount
+            else:
+                discarded.append(tx)
+                logger.warning(
+                    "SPEND descartado — saldo insuficiente: student=%s "
+                    "confirmado=%.2f en_vuelo=%.2f requerido=%.2f concept=%s",
+                    tx.sender, confirmed, in_flight, tx.amount, tx.concept,
+                )
+
+    if discarded:
+        logger.info("%d transacción(es) descartada(s) por saldo insuficiente", len(discarded))
+
+    return valid
+
+
 def handle_result(
     state: NCTState,
     redis_client: Any,
@@ -101,6 +160,11 @@ def handle_result(
 
     Returns ``True`` if the block was successfully mined and persisted.
     """
+    # ---- Duplicate guard: block already mined by another worker ----
+    if state.block_mined.is_set():
+        logger.debug("Resultado duplicado para bloque ya minado — descartado")
+        return False
+
     current_block, fingerprint, difficulty = state.get_current_for_verification()
     if current_block is None:
         logger.debug("No current mining job — ignoring result for block %d", result.block_index)
@@ -127,6 +191,7 @@ def handle_result(
 
     # ---- Persist ----
     save_block(redis_client, current_block)
+    update_balances_from_block(redis_client, current_block)
     state.chain_height = current_block.index + 1
 
     # ---- Broadcast abort / signal block loop ----
@@ -140,10 +205,15 @@ def handle_result(
     return True
 
 
-def accumulate_transactions(state: NCTState, config: NCTConfig) -> list[Transaction]:
+def accumulate_transactions(
+    state: NCTState,
+    redis_client: Any,
+    config: NCTConfig,
+) -> list[Transaction]:
     """Block until the transaction pool meets the threshold or a timeout is reached.
 
     At least one transaction is required; returns an empty list only on shutdown.
+    Transactions are validated for sufficient balance via ``drain_pool_validated``.
     """
     # Wait for at least one transaction
     while state.pool_size() == 0 and not state.shutdown.is_set():
@@ -157,7 +227,7 @@ def accumulate_transactions(state: NCTState, config: NCTConfig) -> list[Transact
     while state.pool_size() < config.block_size and time.time() < deadline:
         time.sleep(0.5)
 
-    return state.drain_pool(config.block_size)
+    return drain_pool_validated(state, redis_client, config.block_size)
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +246,7 @@ def block_loop(
 
     while not state.shutdown.is_set():
         # 1. Accumulate transactions
-        txs = accumulate_transactions(state, config)
+        txs = accumulate_transactions(state, redis_client, config)
         if not txs:
             continue  # shutdown or empty — retry
 
@@ -268,8 +338,8 @@ def result_loop(
 # ---------------------------------------------------------------------------
 
 
-def create_health_app(state: NCTState) -> FastAPI:
-    """Build a FastAPI app wired to the shared NCT state.
+def create_health_app(state: NCTState, redis_client: Any) -> FastAPI:
+    """Build a FastAPI app wired to the shared NCT state and Redis.
 
     The app is created once in ``main()`` and served by uvicorn in a
     background thread — same threading model as before, cleaner contracts.
@@ -300,6 +370,8 @@ def create_health_app(state: NCTState) -> FastAPI:
             sender=tx.sender,
             receiver=tx.receiver,
             amount=tx.amount,
+            tx_type=tx.tx_type,
+            concept=tx.concept,
         )
         errors = t.validate()
         if errors:
@@ -309,6 +381,22 @@ def create_health_app(state: NCTState) -> FastAPI:
             )
         state.add_transaction(t)
         return TransactionResponse(tx_id=t.tx_id)
+
+    @app.get("/balance/{student_id}", response_model=BalanceResponse)
+    def get_student_balance(student_id: str) -> BalanceResponse:
+        balance = get_balance(redis_client, f"student:{student_id}")
+        return BalanceResponse(student_id=student_id, balance=balance)
+
+    @app.get("/chain", response_model=list[dict])
+    def get_chain() -> list[dict]:
+        """Return the full serialised chain (audit trail)."""
+        height = get_chain_height(redis_client)
+        result: list[dict] = []
+        for i in range(height):
+            blk = get_block(redis_client, i)
+            if blk is not None:
+                result.append(blk.to_dict())
+        return result
 
     return app
 
@@ -325,15 +413,25 @@ def health_loop(app: FastAPI, port: int) -> None:
 
 
 def ensure_genesis(redis_client: Any) -> None:
-    """Create and persist the genesis block if the chain is empty."""
+    """Create and persist the genesis block if the chain is empty.
+
+    If the chain already exists but the balance index is empty
+    (e.g. after a crash between ``save_block`` and
+    ``update_balances_from_block``), rebuild it from the chain.
+    """
     existing = get_latest_block(redis_client)
-    if existing is not None:
-        logger.info("Chain already exists (height=%d), skipping genesis", existing.index + 1)
+    if existing is None:
+        genesis = Block.create_genesis()
+        save_block(redis_client, genesis)
+        logger.info("Genesis block created (hash=%s)", genesis.hash)
         return
 
-    genesis = Block.create_genesis()
-    save_block(redis_client, genesis)
-    logger.info("Genesis block created (hash=%s)", genesis.hash)
+    # Recovery: chain exists but balance index is empty
+    if get_chain_height(redis_client) > 0:
+        balance_keys = redis_client.keys(f"{BALANCE_PREFIX}*")
+        if not balance_keys:
+            logger.warning("Índice de saldos vacío con cadena existente — reconstruyendo")
+            rebuild_balances_from_chain(redis_client)
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +467,7 @@ def main() -> None:
     state.chain_height = 1  # genesis is block 0 → height = 1
 
     # ---- FastAPI app (wired to shared state) ----
-    health_app = create_health_app(state)
+    health_app = create_health_app(state, redis_client)
 
     # ---- Threads ----
     threads = [

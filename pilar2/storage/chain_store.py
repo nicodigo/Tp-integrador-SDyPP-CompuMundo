@@ -32,6 +32,7 @@ from shared.block import Block
 # ---------------------------------------------------------------------------
 
 BLOCKS_KEY = "blockchain:blocks"
+BALANCE_PREFIX = "balance:"
 
 # ---------------------------------------------------------------------------
 # Connection
@@ -126,3 +127,65 @@ def validate_chain(client: Any) -> list[dict]:
             errors.append({"index": i, "errors": block_errors})
 
     return errors
+
+
+# ---------------------------------------------------------------------------
+# Balance index (derived cache over the blockchain)
+# ---------------------------------------------------------------------------
+
+
+def get_balance(client: Any, student_id: str) -> float:
+    """Return the confirmed balance of *student_id*, or ``0.0`` if no entry exists.
+
+    The *student_id* must include the ``student:`` prefix
+    (e.g. ``"student:42"``).
+    """
+    val = client.get(f"{BALANCE_PREFIX}{student_id}")
+    return float(val) if val is not None else 0.0
+
+
+def update_balances_from_block(client: Any, block: Block) -> None:
+    """Atomically update the balance index for every transaction in *block*.
+
+    Called from ``handle_result`` immediately after ``save_block``.
+    Uses a Redis pipeline so all INCRBYFLOAT commands are sent in one
+    round-trip.  Not transactional across the full block (documented
+    limitation).
+
+    EARN → credits the student receiver.
+    SPEND → debits the student sender.  Vendor receiver is intentionally
+    *not* credited — vendors do not spend points in this domain.
+    """
+    pipe = client.pipeline()
+    for tx in block.transactions:
+        if tx.tx_type == "EARN":
+            pipe.incrbyfloat(f"{BALANCE_PREFIX}{tx.receiver}", tx.amount)
+        elif tx.tx_type == "SPEND":
+            pipe.incrbyfloat(f"{BALANCE_PREFIX}{tx.sender}", -tx.amount)
+    pipe.execute()
+
+
+def rebuild_balances_from_chain(client: Any) -> None:
+    """Walk the full chain and recompute every student balance from scratch.
+
+    Call at startup when the chain is non-empty but the balance index is
+    missing (e.g. after a crash between ``save_block`` and
+    ``update_balances_from_block``).
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    height = get_chain_height(client)
+    logger.info("Rebuilding balance index from %d block(s)…", height)
+
+    for i in range(height):
+        block = get_block(client, i)
+        if block is None:
+            continue
+        for tx in block.transactions:
+            if tx.tx_type == "EARN":
+                client.incrbyfloat(f"{BALANCE_PREFIX}{tx.receiver}", tx.amount)
+            elif tx.tx_type == "SPEND":
+                client.incrbyfloat(f"{BALANCE_PREFIX}{tx.sender}", -tx.amount)
+
+    logger.info("Balance index rebuilt")

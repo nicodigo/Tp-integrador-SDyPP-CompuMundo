@@ -27,6 +27,8 @@ class Transaction:
     sender: str
     receiver: str
     amount: float
+    tx_type: str = ""
+    concept: str = ""
     timestamp: float = field(default_factory=time.time)
 
     # ------------------------------------------------------------------
@@ -48,6 +50,8 @@ class Transaction:
             "sender": self.sender,
             "receiver": self.receiver,
             "amount": self.amount,
+            "tx_type": self.tx_type,
+            "concept": self.concept,
             "timestamp": self.timestamp,
         }
 
@@ -57,6 +61,8 @@ class Transaction:
             sender=data["sender"],
             receiver=data["receiver"],
             amount=data["amount"],
+            tx_type=data.get("tx_type", ""),
+            concept=data.get("concept", ""),
             timestamp=data["timestamp"],
         )
 
@@ -65,7 +71,11 @@ class Transaction:
     # ------------------------------------------------------------------
 
     def validate(self) -> list[str]:
-        """Return a list of validation errors (empty if valid)."""
+        """Return a list of validation errors (empty if valid).
+
+        Structural rules only — stateless. Balance validation happens at
+        block-assembly time in the NCT's ``drain_pool_validated``.
+        """
         errors: list[str] = []
         if not self.sender:
             errors.append("sender must not be empty")
@@ -75,6 +85,20 @@ class Transaction:
             errors.append("amount must be positive")
         if self.sender == self.receiver:
             errors.append("sender and receiver must be different")
+        if not self.concept:
+            errors.append("concept must not be empty")
+        if self.tx_type not in ("EARN", "SPEND"):
+            errors.append("tx_type must be EARN or SPEND")
+        if self.tx_type == "EARN":
+            if self.sender != "ACADEMIC_SYSTEM":
+                errors.append("EARN sender must be ACADEMIC_SYSTEM")
+            if not self.receiver.startswith("student:"):
+                errors.append("EARN receiver must start with 'student:'")
+        if self.tx_type == "SPEND":
+            if not self.sender.startswith("student:"):
+                errors.append("SPEND sender must start with 'student:'")
+            if not self.receiver.startswith("vendor:"):
+                errors.append("SPEND receiver must start with 'vendor:'")
         return errors
 
 

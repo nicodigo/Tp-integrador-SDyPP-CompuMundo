@@ -21,6 +21,11 @@ class ErrorResponse(BaseModel):
     error: str
 
 
+class BalanceResponse(BaseModel):
+    student_id: str
+    balance: float
+
+
 # ---------------------------------------------------------------------------
 # NCT
 # ---------------------------------------------------------------------------
@@ -30,6 +35,8 @@ class TransactionRequest(BaseModel):
     sender: str = Field(..., min_length=1, description="User sending funds")
     receiver: str = Field(..., min_length=1, description="User receiving funds")
     amount: float = Field(..., gt=0, description="Amount to transfer")
+    tx_type: str = Field(..., pattern=r"^(EARN|SPEND)$", description="Transaction type: EARN or SPEND")
+    concept: str = Field(..., min_length=1, max_length=128, description="Free-text concept (e.g. TP1, FOTOCOPIADORA)")
 
 
 class TransactionResponse(BaseModel):
