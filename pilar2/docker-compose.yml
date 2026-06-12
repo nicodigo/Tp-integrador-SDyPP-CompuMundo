@@ -71,7 +71,7 @@ services:
         condition: service_healthy
     environment:
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
-      - MINER_BINARY=./md5_range
+      - MINER_BINARY=python3 /app/miner/cpu_miner.py
       - WORKER_ID=worker-a1
       - POOL_ID=pool-a
       - HEARTBEAT_INTERVAL=5
@@ -89,7 +89,7 @@ services:
         condition: service_healthy
     environment:
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
-      - MINER_BINARY=./md5_range
+      - MINER_BINARY=python3 /app/miner/cpu_miner.py
       - WORKER_ID=worker-a2
       - POOL_ID=pool-a
       - HEARTBEAT_INTERVAL=5
